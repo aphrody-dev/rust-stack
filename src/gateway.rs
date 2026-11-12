@@ -352,8 +352,7 @@ async fn handle_chat_completions(
         );
         headers.insert(
             "x-rust-stack-provider",
-            HeaderValue::from_str(&provider)
-                .unwrap_or_else(|_| HeaderValue::from_static("local")),
+            HeaderValue::from_str(&provider).unwrap_or_else(|_| HeaderValue::from_static("local")),
         );
         return resp;
     }
@@ -520,9 +519,8 @@ async fn handle_auth_signout(
     headers: HeaderMap,
     body: Option<Json<Value>>,
 ) -> Response {
-    let token = extract_session_token(&headers).or_else(|| {
-        body.and_then(|b| b.get("token").and_then(Value::as_str).map(str::to_string))
-    });
+    let token = extract_session_token(&headers)
+        .or_else(|| body.and_then(|b| b.get("token").and_then(Value::as_str).map(str::to_string)));
     let Some(tok) = token else {
         return Json(json!({ "success": false })).into_response();
     };
@@ -561,7 +559,7 @@ async fn handle_auth_oauth_token(
     }
 }
 
-async fn handle_auth_jwks(State(st): State<GatewayState>) -> Json< crate::auth::JwksDocument > {
+async fn handle_auth_jwks(State(st): State<GatewayState>) -> Json<crate::auth::JwksDocument> {
     Json(st.auth.jwks())
 }
 
@@ -698,11 +696,13 @@ fn try_upstream_failover(
                 "messages": messages,
             });
             if let Ok(resp) = ureq::post(&url)
-                .timeout(Duration::from_millis(900))
-                .set("x-api-key", &api_key)
-                .set("anthropic-version", "2023-06-01")
+                .config()
+                .timeout_global(Some(Duration::from_millis(900)))
+                .build()
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
                 .send_json(payload)
-                && let Ok(v) = resp.into_json::<Value>()
+                && let Ok(v) = resp.into_body().read_json::<Value>()
                 && let Some(txt) = v.pointer("/content/0/text").and_then(Value::as_str)
             {
                 return Some((txt.to_string(), provider.id.to_string()));
@@ -711,10 +711,7 @@ fn try_upstream_failover(
         }
 
         let url = format!("{}/v1/chat/completions", provider.base_url);
-        let upstream_model = model
-            .split_once('/')
-            .map(|(_, m)| m)
-            .unwrap_or(model);
+        let upstream_model = model.split_once('/').map(|(_, m)| m).unwrap_or(model);
         let mut payload = json!({
             "model": upstream_model,
             "messages": messages,
@@ -727,12 +724,15 @@ fn try_upstream_failover(
             payload["max_tokens"] = json!(m);
         }
 
-        let mut req_builder = ureq::post(&url).timeout(Duration::from_millis(350));
+        let mut req_builder = ureq::post(&url)
+            .config()
+            .timeout_global(Some(Duration::from_millis(350)))
+            .build();
         if let Some(key) = bearer {
-            req_builder = req_builder.set("Authorization", &format!("Bearer {key}"));
+            req_builder = req_builder.header("Authorization", &format!("Bearer {key}"));
         }
         if let Ok(resp) = req_builder.send_json(payload)
-            && let Ok(v) = resp.into_json::<Value>()
+            && let Ok(v) = resp.into_body().read_json::<Value>()
             && let Some(txt) = v
                 .pointer("/choices/0/message/content")
                 .and_then(Value::as_str)
@@ -895,7 +895,14 @@ mod tests {
         // 1. Health + Models
         let health: Value = tokio::task::spawn_blocking({
             let b = base.clone();
-            move || ureq::get(&format!("{b}/health")).call().unwrap().into_json().unwrap()
+            move || {
+                ureq::get(&format!("{b}/health"))
+                    .call()
+                    .unwrap()
+                    .into_body()
+                    .read_json()
+                    .unwrap()
+            }
         })
         .await
         .unwrap();
@@ -912,11 +919,21 @@ mod tests {
                 let r1 = ureq::post(&format!("{b}/v1/chat/completions"))
                     .send_json(payload.clone())
                     .unwrap();
-                let c1 = r1.header("x-rust-stack-cache").unwrap_or("").to_string();
+                let c1 = r1
+                    .headers()
+                    .get("x-rust-stack-cache")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
                 let r2 = ureq::post(&format!("{b}/v1/chat/completions"))
                     .send_json(payload)
                     .unwrap();
-                let c2 = r2.header("x-rust-stack-cache").unwrap_or("").to_string();
+                let c2 = r2
+                    .headers()
+                    .get("x-rust-stack-cache")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
                 (c1, c2)
             }
         })
@@ -934,17 +951,22 @@ mod tests {
                     "messages": [{ "role": "user", "content": "Stream tokens" }]
                 }))
                 .unwrap();
-            let sse_text = sse_resp.into_string().unwrap();
+            let sse_text = sse_resp.into_body().read_to_string().unwrap();
             assert!(sse_text.contains("data: [DONE]"));
 
             let emb: Value = ureq::post(&format!("{base}/v1/embeddings"))
                 .send_json(json!({ "input": "SIMD normalized vector", "dimensions": 64 }))
                 .unwrap()
-                .into_json()
+                .into_body()
+                .read_json()
                 .unwrap();
             let vec = emb["data"][0]["embedding"].as_array().unwrap();
             assert_eq!(vec.len(), 64);
-            let norm: f64 = vec.iter().map(|x| x.as_f64().unwrap().powi(2)).sum::<f64>().sqrt();
+            let norm: f64 = vec
+                .iter()
+                .map(|x| x.as_f64().unwrap().powi(2))
+                .sum::<f64>()
+                .sqrt();
             assert!((norm - 1.0).abs() < 1e-4);
 
             let signup: Value = ureq::post(&format!("{base}/api/auth/sign-up/email"))
@@ -953,18 +975,25 @@ mod tests {
                     "password": "ada-lovelace-rust-2024"
                 }))
                 .unwrap()
-                .into_json()
+                .into_body()
+                .read_json()
                 .unwrap();
             let tok = signup["token"].as_str().unwrap();
             let sess: Value = ureq::get(&format!("{base}/api/auth/get-session"))
-                .set("Authorization", &format!("Bearer {tok}"))
+                .header("Authorization", &format!("Bearer {tok}"))
                 .call()
                 .unwrap()
-                .into_json()
+                .into_body()
+                .read_json()
                 .unwrap();
             assert_eq!(sess["user"]["email"], "ada@sovereign.local");
 
-            let html = ureq::get(&format!("{base}/")).call().unwrap().into_string().unwrap();
+            let html = ureq::get(&format!("{base}/"))
+                .call()
+                .unwrap()
+                .into_body()
+                .read_to_string()
+                .unwrap();
             assert!(html.contains("rust-stack | Sovereign AI Workspace"));
         })
         .await

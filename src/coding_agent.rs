@@ -25,8 +25,8 @@ pub struct WorkspaceGuard {
 
 impl WorkspaceGuard {
     pub fn new(root: impl AsRef<Path>) -> Result<Self, String> {
-        let canonical = std::fs::canonicalize(root.as_ref())
-            .unwrap_or_else(|_| root.as_ref().to_path_buf());
+        let canonical =
+            std::fs::canonicalize(root.as_ref()).unwrap_or_else(|_| root.as_ref().to_path_buf());
         if is_forbidden_system_path(&canonical) {
             return Err("refusing to initialize agent in forbidden system directory".to_string());
         }
@@ -57,10 +57,14 @@ impl WorkspaceGuard {
 
         let normalized = normalize_lexical(&joined);
         if is_forbidden_system_path(&normalized) {
-            return Err("blocked by workspace boundary guard: System32 access is forbidden".to_string());
+            return Err(
+                "blocked by workspace boundary guard: System32 access is forbidden".to_string(),
+            );
         }
         if is_secret_env_file(&normalized) {
-            return Err("blocked by secret guard: reading or mutating .env files is forbidden".to_string());
+            return Err(
+                "blocked by secret guard: reading or mutating .env files is forbidden".to_string(),
+            );
         }
 
         let root_norm = normalize_lexical(&self.root);
@@ -77,7 +81,9 @@ impl WorkspaceGuard {
     pub fn check_shell_command(&self, cmd: &str) -> Result<(), String> {
         let lower = cmd.to_ascii_lowercase();
         if lower.contains("system32") || lower.contains("syswow64") {
-            return Err("blocked by shell guard: System32/SysWOW64 reference forbidden".to_string());
+            return Err(
+                "blocked by shell guard: System32/SysWOW64 reference forbidden".to_string(),
+            );
         }
         if lower.contains(".env") {
             return Err("blocked by shell guard: .env access forbidden".to_string());
@@ -307,8 +313,7 @@ impl CodingAgent {
             .ok_or_else(|| "missing 'content'".to_string())?;
         let safe = self.guard.resolve_safe_path(path_str)?;
         if let Some(parent) = safe.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("create_dir_all failed: {e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {e}"))?;
         }
         std::fs::write(&safe, content)
             .map_err(|e| format!("write failed for {}: {e}", safe.display()))?;
@@ -435,11 +440,13 @@ impl CodingAgent {
             });
 
             let response_json = match ureq::post(&endpoint)
-                .timeout(std::time::Duration::from_secs(12))
-                .set("Content-Type", "application/json")
+                .config()
+                .timeout_global(Some(std::time::Duration::from_secs(12)))
+                .build()
+                .header("Content-Type", "application/json")
                 .send_json(payload)
             {
-                Ok(resp) => resp.into_json::<Value>().ok(),
+                Ok(resp) => resp.into_body().read_json::<Value>().ok(),
                 Err(_) => None,
             };
 
@@ -608,20 +615,33 @@ mod tests {
 
     #[test]
     fn guard_blocks_system32_env_and_escape_and_runs_5_tools() {
-        let tmp = std::env::temp_dir().join(format!(
-            "rust_stack_agent_test_{}",
-            crate::auth::unix_now()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("rust_stack_agent_test_{}", crate::auth::unix_now()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let agent = CodingAgent::new(&tmp, "http://127.0.0.1:9", "sovereign/ring3-local").unwrap();
 
         // Guard checks
-        assert!(agent.guard.resolve_safe_path("C:\\Windows\\System32\\cmd.exe").is_err());
+        assert!(
+            agent
+                .guard
+                .resolve_safe_path("C:\\Windows\\System32\\cmd.exe")
+                .is_err()
+        );
         assert!(agent.guard.resolve_safe_path(".env").is_err());
-        assert!(agent.guard.resolve_safe_path("..\\..\\outside.txt").is_err());
+        assert!(
+            agent
+                .guard
+                .resolve_safe_path("..\\..\\outside.txt")
+                .is_err()
+        );
         assert!(agent.guard.check_shell_command("Get-Content .env").is_err());
-        assert!(agent.guard.check_shell_command("dir C:\\Windows\\System32").is_err());
+        assert!(
+            agent
+                .guard
+                .check_shell_command("dir C:\\Windows\\System32")
+                .is_err()
+        );
 
         // 1. write_file
         let w = agent.execute_tool(&ToolCallSpec {

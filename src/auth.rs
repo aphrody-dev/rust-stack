@@ -1,10 +1,7 @@
-use argon2::{
-    Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use pbkdf2::pbkdf2_hmac;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -312,8 +309,7 @@ impl AuthEngine {
         let (kid, signing_key) = load_or_create_ed25519_key(&conn)?;
         let secret = if hmac_secret.is_empty() {
             let mut derived = [0u8; 32];
-            getrandom::getrandom(&mut derived)
-                .map_err(|e| format!("getrandom failed: {e}"))?;
+            getrandom::fill(&mut derived).map_err(|e| format!("getrandom failed: {e}"))?;
             derived.to_vec()
         } else {
             hmac_secret.to_vec()
@@ -898,9 +894,8 @@ impl AuthEngine {
             scope: scope.map(str::to_string),
         };
         let h_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
-        let p_b64 = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&claims).map_err(|e| format!("jwt serialize failed: {e}"))?,
-        );
+        let p_b64 = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).map_err(|e| format!("jwt serialize failed: {e}"))?);
         let signing_input = format!("{h_b64}.{p_b64}");
         let sig: Signature = self.ed25519_signing.sign(signing_input.as_bytes());
         let s_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
@@ -1068,14 +1063,12 @@ pub fn verify_hs256_jwt(token: &str, secret: &[u8]) -> Result<JwtClaims, String>
 
 pub fn hash_password(password: &str, algo: PasswordAlgorithm) -> Result<String, String> {
     let mut salt_bytes = [0u8; 16];
-    getrandom::getrandom(&mut salt_bytes).map_err(|e| format!("rng failed: {e}"))?;
+    getrandom::fill(&mut salt_bytes).map_err(|e| format!("rng failed: {e}"))?;
     match algo {
         PasswordAlgorithm::Argon2id => {
-            let salt = SaltString::encode_b64(&salt_bytes)
-                .map_err(|e| format!("salt encode failed: {e}"))?;
             let argon2 = Argon2::default();
             argon2
-                .hash_password(password.as_bytes(), &salt)
+                .hash_password_with_salt(password.as_bytes(), &salt_bytes)
                 .map(|h| h.to_string())
                 .map_err(|e| format!("argon2id failed: {e}"))
         }
@@ -1107,8 +1100,8 @@ pub fn verify_password(password: &str, encoded: &str) -> Result<bool, String> {
         pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, rounds, &mut dk);
         Ok(constant_time_eq(&dk, &expected))
     } else {
-        let parsed = PasswordHash::new(encoded)
-            .map_err(|e| format!("invalid password hash format: {e}"))?;
+        let parsed =
+            PasswordHash::new(encoded).map_err(|e| format!("invalid password hash format: {e}"))?;
         Ok(Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
             .is_ok())
@@ -1139,7 +1132,7 @@ fn load_or_create_ed25519_key(conn: &Connection) -> Result<(String, SigningKey),
     }
 
     let mut seed = [0u8; 32];
-    getrandom::getrandom(&mut seed).map_err(|e| format!("rng failed: {e}"))?;
+    getrandom::fill(&mut seed).map_err(|e| format!("rng failed: {e}"))?;
     let signing = SigningKey::from_bytes(&seed);
     let vk_hash = blake3::hash(signing.verifying_key().as_bytes()).to_hex();
     let kid = format!("rsk-ed25519-{}", &vk_hash[..12]);
@@ -1166,13 +1159,13 @@ fn sha256_hex(data: &[u8]) -> String {
 
 fn random_hex(bytes_len: usize) -> Result<String, String> {
     let mut buf = vec![0u8; bytes_len];
-    getrandom::getrandom(&mut buf).map_err(|e| format!("rng failed: {e}"))?;
+    getrandom::fill(&mut buf).map_err(|e| format!("rng failed: {e}"))?;
     Ok(hex::encode(buf))
 }
 
 fn random_url_token(bytes_len: usize) -> Result<String, String> {
     let mut buf = vec![0u8; bytes_len];
-    getrandom::getrandom(&mut buf).map_err(|e| format!("rng failed: {e}"))?;
+    getrandom::fill(&mut buf).map_err(|e| format!("rng failed: {e}"))?;
     Ok(URL_SAFE_NO_PAD.encode(buf))
 }
 
